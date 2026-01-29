@@ -18,7 +18,9 @@ version = mod_version
 group = mod_group_id
 
 repositories {
-    // Add here additional repositories if required by some of the dependencies below.
+    flatDir {
+        dirs 'libs'
+    }
 }
 
 base {
@@ -111,7 +113,9 @@ configurations {
     runtimeClasspath.extendsFrom localRuntime
 }
 
-dependencies {
+    dependencies {
+        // Replace these filenames with the EXACT names of the jars in your libs folder
+        implementation fileTree(dir: 'libs', include: '*.jar')
     // Example optional mod dependency with JEI
     // The JEI API is declared for compile time use, while the full JEI artifact is used at runtime
     // compileOnly "mezz.jei:jei-${mc_version}-common-api:${jei_version}"
