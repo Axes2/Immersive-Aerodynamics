@@ -33,20 +33,23 @@ public abstract class MixinAircraftEntity extends EngineVehicle {
         if (!isServer && !isClientPilot) return;
 
         // --- PREPARE DATA ---
+        // 1. Get Real Wind Data
         Vec3 windVector = WindEngine.getWind(this.position(), this.level(), false, !Config.ENABLE_TORNADO_SUCTION.get(), true);
         double rawWindSpeed = windVector.length();
-        double threshold = Config.WIND_THRESHOLD.get();
+        double baseThreshold = Config.WIND_THRESHOLD.get(); // e.g. 30.0
 
-        // 1. STANDARD WIND DRIFT (Keep existing logic)
-        double influence = Config.WIND_INFLUENCE.get() / 10000.0; // Scaled 9.0 -> 0.0009
+        // 2. DRIFT LOGIC (The "Push")
+        // Starts immediately at the threshold (e.g. > 30mph)
+        if (rawWindSpeed > baseThreshold) {
+            double influence = Config.WIND_INFLUENCE.get() / 10000.0;
+            double effectiveSpeed = rawWindSpeed - baseThreshold;
 
-        if (rawWindSpeed > threshold) {
-            double effectiveSpeed = rawWindSpeed - threshold;
-
+            // Mass Inertia (Linear or Curves based on config, but usually linear logic)
             float baseMass = this.getProperties().get(VehicleStat.MASS);
             if (baseMass < 0.1) baseMass = 0.1f;
             double effectiveMass = Math.pow(baseMass, Config.MASS_SCALING.get());
 
+            // Altitude Scaling
             double altitude = this.getY();
             double altitudeBonus = 1.0;
             if (altitude > 100) altitudeBonus += (altitude - 100) / 100.0;
@@ -65,32 +68,40 @@ public abstract class MixinAircraftEntity extends EngineVehicle {
                     double maxReasonableSpeed = 1.5;
                     double speedRatio = Math.min(currentSpeed / maxReasonableSpeed, 1.0);
                     double reduction = speedRatio * alignment;
-                    dampeningFactor = 1.0 - (reduction * 0.8); // Soft cap (min 20% force)
+                    dampeningFactor = 1.0 - (reduction * 0.8);
                 }
             }
 
-            // Apply Drift Force
+            // Apply Drift
             double forceMagnitude = (effectiveSpeed * influence * altitudeBonus * dampeningFactor) / effectiveMass;
             Vec3 push = windVector.normalize().scale(forceMagnitude);
             this.setDeltaMovement(this.getDeltaMovement().add(push));
 
-            // 2. FEATURE #2: AIR POCKETS (Downdrafts)
-            // Logic: Random chance to slam the plane down if wind is strong
-            if (this.random.nextFloat() < Config.AIR_POCKET_CHANCE.get()) {
+            // 3. AIR POCKETS (The "Drop")
+            // DELAYED START: Only happens if wind is significantly higher than threshold (+50)
+            // Example: If Threshold is 30, this starts at 80.
+            double pocketThreshold = baseThreshold + 50.0;
 
-                // Strength scales with how far above threshold
-                double severity = Math.min((rawWindSpeed - threshold) / 50.0, 2.0); // 0.0 to 2.0
-                double pocketForce = (Config.AIR_POCKET_STRENGTH.get() / 10.0) * (1.0 + severity); // 2.0 -> 0.2 base
+            if (rawWindSpeed > pocketThreshold) {
+                if (this.random.nextFloat() < Config.AIR_POCKET_CHANCE.get()) {
 
-                // Apply downward slam
-                this.setDeltaMovement(this.getDeltaMovement().add(0, -pocketForce, 0));
+                    // Severity scales linearly from the POCKET threshold, not the base threshold.
+                    // This prevents it from "snapping" in at max strength.
+                    // 0% at 80mph, 100% at 130mph (assuming div 50)
+                    double severity = Math.min((rawWindSpeed - pocketThreshold) / 50.0, 2.0);
 
-                if (Config.DEBUG_MODE.get() && isClientPilot && this.getControllingPassenger() instanceof net.minecraft.world.entity.player.Player) {
-                    net.minecraft.client.Minecraft.getInstance().gui.getChat().addMessage(net.minecraft.network.chat.Component.literal("§c⚠ AIR POCKET!"));
+                    double strengthBase = Config.AIR_POCKET_STRENGTH.get() / 10.0;
+                    double pocketForce = strengthBase * (1.0 + severity);
+
+                    this.setDeltaMovement(this.getDeltaMovement().add(0, -pocketForce, 0));
+
+                    if (Config.DEBUG_MODE.get() && isClientPilot && this.getControllingPassenger() instanceof net.minecraft.world.entity.player.Player) {
+                        net.minecraft.client.Minecraft.getInstance().gui.getChat().addMessage(net.minecraft.network.chat.Component.literal("§c⚠ AIR POCKET!"));
+                    }
                 }
             }
 
-            // Debug Message for in game command
+            // Debug Output
             if (Config.DEBUG_MODE.get() && this.tickCount % 20 == 0) {
                 if (this.getControllingPassenger() instanceof net.minecraft.world.entity.player.Player) {
                     String color = "§a";
@@ -98,7 +109,6 @@ public abstract class MixinAircraftEntity extends EngineVehicle {
                     String dampMsg = (dampeningFactor < 0.99) ? String.format(" | Damp:%.2f", dampeningFactor) : "";
                     String msg = String.format("%s%s Wind:%.0f | Push:%.4f%s",
                             side, color, rawWindSpeed, forceMagnitude, dampMsg);
-
                     if (isClientPilot) {
                         net.minecraft.client.Minecraft.getInstance().gui.getChat().addMessage(net.minecraft.network.chat.Component.literal(msg));
                     }
@@ -108,64 +118,66 @@ public abstract class MixinAircraftEntity extends EngineVehicle {
     }
 
     /**
-     * DIRECTIONAL TURBULENCE (Axis Instability)
-     * Headwind = Pitch Noise (X)
-     * Crosswind = Yaw Noise (Z)
+     * VISUAL TURBULENCE (Linear Scaling with Delay)
      */
     @org.spongepowered.asm.mixin.Overwrite
     public Vector3f getWindEffect() {
-        // --- 1. BASE WIND CALCS ---
+        // --- 1. BASE DATA ---
         float wind = this.getWindStrength();
         Vec3 realWind = WindEngine.getWind(this.position(), this.level());
         double windSpeed = realWind.length();
-        double threshold = Config.WIND_THRESHOLD.get() * 0.5;
 
-        if (windSpeed > threshold) {
+        // --- 2. TURBULENCE LOGIC (The "Shake") ---
+        // DELAYED START: Starts 30mph after the drift threshold.
+        // Example: If Threshold is 30, Turbulence starts at 60.
+        double baseThreshold = Config.WIND_THRESHOLD.get();
+        double turbStart = baseThreshold + 30.0;
+
+        double severity = 0.0;
+
+        if (windSpeed > turbStart) {
+            // Linear Scaling:
+            // 0% at 60mph
+            // 100% at ~110mph (assuming div 50 scaling factor roughly matches your multiplier)
+            double excess = windSpeed - turbStart;
             double turbMult = Config.TURBULENCE_MULTIPLIER.get() / 100.0;
-            wind += (float) ((windSpeed - threshold) * turbMult);
+
+            // Add to base wind effect
+            wind += (float) (excess * turbMult);
+
+            // Calculate a 0.0-1.0 severity factor for the Shudder
+            severity = Math.min(excess / 50.0, 1.0);
         }
 
-        // --- 2. DIRECTIONAL BIAS ---
+        // --- 3. DIRECTIONAL BIAS ---
         Vec3 velocity = this.getDeltaMovement();
         double dot = 1.0;
         if (velocity.lengthSqr() > 0.01 && realWind.lengthSqr() > 0.01) {
             dot = Math.abs(velocity.normalize().dot(realWind.normalize()));
         }
 
-        // --- 3. LAYER A: LOW FREQ (The Sway) ---
-        // Existing "Heavy" movement (Pitch/Yaw)
+        // --- 4. LAYER A: LOW FREQ (Sway) ---
         double lowFreq = this.tickCount / 20.0 / Math.max(0.1, this.getProperties().get(VehicleStat.MASS));
-
         float swayX = (float) Utils.cosNoise(lowFreq);
-        // Apply "Danger Bias" (Down is generally stronger)
         if (swayX > 0) swayX *= Config.PITCH_DOWN_BIAS.get();
-
         float swayZ = (float) Utils.cosNoise(lowFreq + 100);
 
-        // --- 4. LAYER B: HIGH FREQ (Shudder) ---
-        // New "Fast" movement (Vibration)
-        // Frequency is much higher (div 2.0 instead of 20.0)
+        // --- 5. LAYER B: HIGH FREQ (Shudder) ---
+        // Only active if we are past the turbulence threshold
         double highFreq = this.tickCount / 2.0;
-
-        // Intensity scales with wind speed.
-        // We only start shaking if wind is decently strong (> threshold).
         float shudderIntensity = 0.0f;
-        if (windSpeed > threshold) {
-            // Scale: 0 at threshold, Max at +50mph
-            double severity = Math.min((windSpeed - threshold) / 140.0, 1.0); //New change for turbulence scaling rate
+
+        if (severity > 0) {
             shudderIntensity = (float) (severity * Config.VIBRATION_STRENGTH.get() * 0.1);
-            // Note: 0.1 multiplier keeps it more subtle. We want "buzz", not seizure.
         }
 
         float buzzX = (float) (Utils.cosNoise(highFreq) * shudderIntensity);
         float buzzZ = (float) (Utils.cosNoise(highFreq + 50) * shudderIntensity);
 
-        // --- 5. COMBINE LAYERS ---
+        // --- 6. COMBINE ---
         float pitchBias = (float) Math.max(0.3, dot);
         float yawBias = (float) Math.max(0.3, 1.0 - dot);
 
-        // Final X = (Sway * Bias) + Buzz
-        // We add Buzz at the end so it shakes regardless of direction
         float finalX = (swayX * wind * pitchBias) + buzzX;
         float finalZ = (swayZ * wind * yawBias) + buzzZ;
 
