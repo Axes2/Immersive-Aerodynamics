@@ -30,6 +30,8 @@ public abstract class MixinAircraftEntity extends EngineVehicle {
         if (!this.isAlive()) return;
         boolean isServer = !this.level().isClientSide;
         boolean isClientPilot = this.level().isClientSide && this.isControlledByLocalInstance();
+
+        // Run logic if we are the Server (for all planes) OR the Client Pilot (for our own plane)
         if (!isServer && !isClientPilot) return;
 
         // --- PREPARE DATA ---
@@ -44,7 +46,7 @@ public abstract class MixinAircraftEntity extends EngineVehicle {
             double influence = Config.WIND_INFLUENCE.get() / 10000.0;
             double effectiveSpeed = rawWindSpeed - baseThreshold;
 
-            // Mass Inertia (Linear or Curves based on config, but usually linear logic)
+            // Mass Inertia
             float baseMass = this.getProperties().get(VehicleStat.MASS);
             if (baseMass < 0.1) baseMass = 0.1f;
             double effectiveMass = Math.pow(baseMass, Config.MASS_SCALING.get());
@@ -79,15 +81,12 @@ public abstract class MixinAircraftEntity extends EngineVehicle {
 
             // 3. AIR POCKETS (The "Drop")
             // DELAYED START: Only happens if wind is significantly higher than threshold (+50)
-            // Example: If Threshold is 30, this starts at 80.
             double pocketThreshold = baseThreshold + 50.0;
 
             if (rawWindSpeed > pocketThreshold) {
                 if (this.random.nextFloat() < Config.AIR_POCKET_CHANCE.get()) {
 
-                    // Severity scales linearly from the POCKET threshold, not the base threshold.
-                    // This prevents it from "snapping" in at max strength.
-                    // 0% at 80mph, 100% at 130mph (assuming div 50)
+                    // Severity scales linearly from the POCKET threshold
                     double severity = Math.min((rawWindSpeed - pocketThreshold) / 50.0, 2.0);
 
                     double strengthBase = Config.AIR_POCKET_STRENGTH.get() / 10.0;
@@ -95,23 +94,26 @@ public abstract class MixinAircraftEntity extends EngineVehicle {
 
                     this.setDeltaMovement(this.getDeltaMovement().add(0, -pocketForce, 0));
 
-                    if (Config.DEBUG_MODE.get() && isClientPilot && this.getControllingPassenger() instanceof net.minecraft.world.entity.player.Player) {
-                        net.minecraft.client.Minecraft.getInstance().gui.getChat().addMessage(net.minecraft.network.chat.Component.literal("§c⚠ AIR POCKET!"));
+                    // FIX: Use player.displayClientMessage (Safe for Server)
+                    // Added 'true' to send to Action Bar (Overlay) instead of Chat
+                    if (Config.DEBUG_MODE.get() && this.getControllingPassenger() instanceof net.minecraft.world.entity.player.Player player) {
+                        player.displayClientMessage(net.minecraft.network.chat.Component.literal("§c⚠ AIR POCKET!"), true);
                     }
                 }
             }
 
             // Debug Output
             if (Config.DEBUG_MODE.get() && this.tickCount % 20 == 0) {
-                if (this.getControllingPassenger() instanceof net.minecraft.world.entity.player.Player) {
+                // FIX: Use player.displayClientMessage (Safe for Server)
+                if (this.getControllingPassenger() instanceof net.minecraft.world.entity.player.Player player) {
                     String color = "§a";
                     String side = isServer ? "§e[S]" : "§b[C]";
                     String dampMsg = (dampeningFactor < 0.99) ? String.format(" | Damp:%.2f", dampeningFactor) : "";
                     String msg = String.format("%s%s Wind:%.0f | Push:%.4f%s",
                             side, color, rawWindSpeed, forceMagnitude, dampMsg);
-                    if (isClientPilot) {
-                        net.minecraft.client.Minecraft.getInstance().gui.getChat().addMessage(net.minecraft.network.chat.Component.literal(msg));
-                    }
+
+                    // 'false' sends to Chat
+                    player.displayClientMessage(net.minecraft.network.chat.Component.literal(msg), false);
                 }
             }
         }
@@ -129,16 +131,13 @@ public abstract class MixinAircraftEntity extends EngineVehicle {
 
         // --- 2. TURBULENCE LOGIC (The "Shake") ---
         // DELAYED START: Starts 30mph after the drift threshold.
-        // Example: If Threshold is 30, Turbulence starts at 60.
         double baseThreshold = Config.WIND_THRESHOLD.get();
         double turbStart = baseThreshold + 30.0;
 
         double severity = 0.0;
 
         if (windSpeed > turbStart) {
-            // Linear Scaling:
-            // 0% at 60mph
-            // 100% at ~110mph (assuming div 50 scaling factor roughly matches your multiplier)
+            // Linear Scaling
             double excess = windSpeed - turbStart;
             double turbMult = Config.TURBULENCE_MULTIPLIER.get() / 100.0;
 
